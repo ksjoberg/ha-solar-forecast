@@ -1,125 +1,102 @@
-"""
-Config flow schemas.
-
-Schemas for the main configuration flow steps:
-- User setup
-- Reconfiguration
-- Reauthentication
-
-When this file grows too large (>300 lines), consider splitting into:
-- user.py: User setup schemas
-- reauth.py: Reauthentication schemas
-- reconfigure.py: Reconfiguration schemas
-"""
+"""Schemas for the main config flow steps."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
-
 import voluptuous as vol
 
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from custom_components.ha_solar_forecast.const import (
+    CONF_ELEVATION,
+    CONF_LATITUDE,
+    CONF_LONGITUDE,
+    CONF_PANEL_AZIMUTH,
+    CONF_PANEL_INCLINATION,
+    CONF_PANEL_NAME,
+    CONF_PANEL_PEAK_POWER,
+    CONF_WEATHER_ENTITY,
+)
 from homeassistant.helpers import selector
 
 
-def get_user_schema(defaults: Mapping[str, Any] | None = None) -> vol.Schema:
-    """
-    Get schema for user step (initial setup).
-
-    Args:
-        defaults: Optional dictionary of default values to pre-populate the form.
-
-    Returns:
-        Voluptuous schema for user credentials input.
-
-    """
-    defaults = defaults or {}
+def get_location_schema(
+    latitude: float,
+    longitude: float,
+    elevation: float,
+) -> vol.Schema:
+    """Schema for the first step: location + weather entity."""
     return vol.Schema(
         {
-            vol.Required(
-                CONF_USERNAME,
-                default=defaults.get(CONF_USERNAME, vol.UNDEFINED),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
-                ),
+            vol.Required(CONF_LATITUDE, default=latitude): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-90,
+                    max=90,
+                    step=0.000001,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="°",
+                )
             ),
-            vol.Required(CONF_PASSWORD): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
-                ),
+            vol.Required(CONF_LONGITUDE, default=longitude): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-180,
+                    max=180,
+                    step=0.000001,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="°",
+                )
             ),
-        },
+            vol.Optional(CONF_ELEVATION, default=elevation): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-500,
+                    max=9000,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="m",
+                )
+            ),
+            vol.Required(CONF_WEATHER_ENTITY): selector.EntitySelector(selector.EntitySelectorConfig(domain="weather")),
+        }
     )
 
 
-def get_reconfigure_schema(username: str) -> vol.Schema:
-    """
-    Get schema for reconfigure step.
-
-    Args:
-        username: Current username to pre-fill in the form.
-
-    Returns:
-        Voluptuous schema for reconfiguration.
-
-    """
+def get_panel_schema(defaults: dict | None = None) -> vol.Schema:
+    """Schema for a solar panel array configuration step."""
+    d = defaults or {}
     return vol.Schema(
         {
-            vol.Required(
-                CONF_USERNAME,
-                default=username,
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
-                ),
+            vol.Required(CONF_PANEL_NAME, default=d.get(CONF_PANEL_NAME, "")): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),
-            vol.Required(
-                CONF_PASSWORD,
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
-                ),
+            vol.Required(CONF_PANEL_PEAK_POWER, default=d.get(CONF_PANEL_PEAK_POWER, 3000)): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=100000,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="Wp",
+                )
             ),
-        },
-    )
-
-
-def get_reauth_schema(username: str) -> vol.Schema:
-    """
-    Get schema for reauthentication step.
-
-    Args:
-        username: Current username to pre-fill in the form.
-
-    Returns:
-        Voluptuous schema for reauthentication.
-
-    """
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_USERNAME,
-                default=username,
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
-                ),
+            vol.Required(CONF_PANEL_INCLINATION, default=d.get(CONF_PANEL_INCLINATION, 35)): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=90,
+                    step=1,
+                    mode=selector.NumberSelectorMode.SLIDER,
+                    unit_of_measurement="°",
+                )
             ),
-            vol.Required(
-                CONF_PASSWORD,
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
-                ),
+            vol.Required(CONF_PANEL_AZIMUTH, default=d.get(CONF_PANEL_AZIMUTH, 180)): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=360,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="°",
+                )
             ),
-        },
+        }
     )
 
 
 __all__ = [
-    "get_reauth_schema",
-    "get_reconfigure_schema",
-    "get_user_schema",
+    "get_location_schema",
+    "get_panel_schema",
 ]

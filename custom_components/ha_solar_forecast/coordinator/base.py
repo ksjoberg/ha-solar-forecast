@@ -1,125 +1,163 @@
-"""
-Core DataUpdateCoordinator implementation for ha_solar_forecast.
-
-This module contains the main coordinator class that manages data fetching
-and updates for all entities in the integration. It handles refresh cycles,
-error handling, and triggers reauthentication when needed.
-
-For more information on coordinators:
-https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
-"""
+"""DataUpdateCoordinator for Solar Forecast."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
-from custom_components.ha_solar_forecast.api import (
-    SolarForecastApiClientAuthenticationError,
-    SolarForecastApiClientError,
+from custom_components.ha_solar_forecast.const import (
+    CONF_LATITUDE,
+    CONF_LONGITUDE,
+    CONF_PANELS,
+    CONF_WEATHER_ENTITY,
+    DEFAULT_ATTENUATION,
+    LOGGER,
+    SYSTEM_EFFICIENCY,
+    UPDATE_INTERVAL_MINUTES,
+    WEATHER_ATTENUATION,
 )
-from custom_components.ha_solar_forecast.const import LOGGER
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from custom_components.ha_solar_forecast.data import CoordinatorData, ForecastPoint
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .solar_math import clear_sky_ghi, solar_elevation_azimuth, total_system_power_w
 
 if TYPE_CHECKING:
     from custom_components.ha_solar_forecast.data import SolarForecastConfigEntry
+    from homeassistant.core import HomeAssistant
 
 
-class SolarForecastDataUpdateCoordinator(DataUpdateCoordinator):
-    """
-    Class to manage fetching data from the API.
-
-    This coordinator handles all data fetching for the integration and distributes
-    updates to all entities. It manages:
-    - Periodic data updates based on update_interval
-    - Error handling and recovery
-    - Authentication failure detection and reauthentication triggers
-    - Data distribution to all entities
-    - Context-based data fetching (only fetch data for active entities)
-
-    For more information:
-    https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
-
-    Attributes:
-        config_entry: The config entry for this integration instance.
-    """
+class SolarForecastDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
+    """Coordinator that fetches weather forecasts and computes solar production."""
 
     config_entry: SolarForecastConfigEntry
 
-    async def _async_setup(self) -> None:
-        """
-        Set up the coordinator.
+    def __init__(self, hass: HomeAssistant, config_entry: SolarForecastConfigEntry) -> None:
+        """Initialise the coordinator."""
+        super().__init__(
+            hass,
+            LOGGER,
+            name=f"Solar Forecast ({config_entry.title})",
+            update_interval=timedelta(minutes=UPDATE_INTERVAL_MINUTES),
+            always_update=False,
+            config_entry=config_entry,
+        )
 
-        This method is called automatically during async_config_entry_first_refresh()
-        and is the ideal place for one-time initialization tasks such as:
-        - Loading device information
-        - Setting up event listeners
-        - Initializing caches
+    async def _async_update_data(self) -> CoordinatorData:
+        """Fetch hourly weather forecasts and compute solar production for each slot."""
+        entry_data = self.config_entry.data
+        lat: float = entry_data[CONF_LATITUDE]
+        lon: float = entry_data[CONF_LONGITUDE]
+        panels: list[dict[str, Any]] = entry_data.get(CONF_PANELS, [])
+        weather_entity: str = entry_data[CONF_WEATHER_ENTITY]
 
-        This runs before the first data fetch, ensuring any required setup
-        is complete before entities start requesting data.
-        """
-        # Example: Fetch device info once at startup
-        # device_info = await self.config_entry.runtime_data.client.get_device_info()
-        # self._device_id = device_info["id"]
-        LOGGER.debug("Coordinator setup complete for %s", self.config_entry.entry_id)
+        if not panels:
+            return CoordinatorData(current_power_w=0.0, forecast=[])
 
-    async def _async_update_data(self) -> Any:
-        """
-        Fetch data from API endpoint.
+        forecasts = await self._fetch_forecasts(weather_entity)
+        if not forecasts:
+            return CoordinatorData(current_power_w=0.0, forecast=[])
 
-        This is the only method that should be implemented in a DataUpdateCoordinator.
-        It is called automatically based on the update_interval.
+        forecast_points = self._compute_forecast(lat, lon, panels, forecasts)
 
-        Context-based fetching:
-        The coordinator tracks which entities are currently listening via async_contexts().
-        This allows optimizing API calls to only fetch data that's actually needed.
-        For example, if only sensor entities are enabled, we can skip fetching switch data.
+        current_power = self._interpolate_current(forecast_points)
+        return CoordinatorData(current_power_w=current_power, forecast=forecast_points)
 
-        The API client uses the credentials from config_entry to authenticate:
-        - username: from config_entry.data["username"]
-        - password: from config_entry.data["password"]
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
-        Expected API response structure (example):
-        {
-            "userId": 1,      # Used as device identifier
-            "id": 1,          # Data record ID
-            "title": "...",   # Additional metadata
-            "body": "...",    # Additional content
-            # In production, would include:
-            # "air_quality": {"aqi": 45, "pm25": 12.3},
-            # "filter": {"life_remaining": 75, "runtime_hours": 324},
-            # "settings": {"fan_speed": "medium", "humidity": 55}
-        }
-
-        Returns:
-            The data from the API as a dictionary.
-
-        Raises:
-            ConfigEntryAuthFailed: If authentication fails, triggers reauthentication.
-            UpdateFailed: If data fetching fails for other reasons, optionally with retry_after.
-        """
+    async def _fetch_forecasts(self, weather_entity: str) -> list[dict[str, Any]]:
+        """Call weather.get_forecasts and return the hourly list."""
         try:
-            # Optional: Get active entity contexts to optimize data fetching
-            # listening_contexts = set(self.async_contexts())
-            # LOGGER.debug("Active entity contexts: %s", listening_contexts)
+            raw = await self.hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": weather_entity, "type": "hourly"},
+                blocking=True,
+                return_response=True,
+            )
+        except Exception as exc:
+            raise UpdateFailed(f"Failed to fetch weather forecast from {weather_entity}: {exc}") from exc
 
-            # Fetch data from API
-            # In production, you could pass listening_contexts to optimize the API call:
-            # return await self.config_entry.runtime_data.client.async_get_data(listening_contexts)
-            return await self.config_entry.runtime_data.client.async_get_data()
-        except SolarForecastApiClientAuthenticationError as exception:
-            LOGGER.warning("Authentication error - %s", exception)
-            raise ConfigEntryAuthFailed(
-                translation_domain="ha_solar_forecast",
-                translation_key="authentication_failed",
-            ) from exception
-        except SolarForecastApiClientError as exception:
-            LOGGER.exception("Error communicating with API")
-            # If the API provides rate limit information, you can honor it:
-            # if hasattr(exception, 'retry_after'):
-            #     raise UpdateFailed(retry_after=exception.retry_after) from exception
-            raise UpdateFailed(
-                translation_domain="ha_solar_forecast",
-                translation_key="update_failed",
-            ) from exception
+        if not isinstance(raw, dict):
+            return []
+        entity_data = raw.get(weather_entity)
+        if not isinstance(entity_data, dict):
+            return []
+        forecasts = entity_data.get("forecast")
+        if not isinstance(forecasts, list):
+            return []
+        return cast(list[dict[str, Any]], forecasts)
+
+    def _compute_forecast(
+        self,
+        lat: float,
+        lon: float,
+        panels: list[dict[str, Any]],
+        raw_forecasts: list[dict[str, Any]],
+    ) -> list[ForecastPoint]:
+        """Convert raw weather forecast slots into solar power estimates."""
+        points: list[ForecastPoint] = []
+
+        for slot in raw_forecasts:
+            dt_str: str = slot.get("datetime", "")
+            if not dt_str:
+                continue
+
+            try:
+                dt = datetime.fromisoformat(dt_str)
+            except ValueError:
+                continue
+
+            # Solar position at the midpoint of the hour
+            dt_mid = dt + timedelta(minutes=30)
+            elevation, azimuth = solar_elevation_azimuth(lat, lon, dt_mid)
+
+            ghi_clear = clear_sky_ghi(elevation)
+
+            # Determine weather attenuation from cloud coverage or condition
+            cloud_coverage: float | None = slot.get("cloud_coverage")
+            if cloud_coverage is not None:
+                # Cloud coverage 0–100 → attenuation 1.0…0.10
+                factor = 1.0 - (cloud_coverage / 100.0) * 0.90
+            else:
+                condition: str = slot.get("condition", "")
+                factor = WEATHER_ATTENUATION.get(condition, DEFAULT_ATTENUATION)
+
+            ghi_attenuated = ghi_clear * factor
+
+            power_w = total_system_power_w(
+                panels=panels,
+                elevation_deg=elevation,
+                azimuth_deg=azimuth,
+                weather_ghi=ghi_attenuated,
+                efficiency=SYSTEM_EFFICIENCY,
+            )
+
+            # energy_wh = power_w * 1 h (hourly slots)
+            points.append(
+                ForecastPoint(
+                    datetime=dt_str,
+                    power_w=round(power_w, 1),
+                    energy_wh=round(power_w * 1.0, 1),
+                )
+            )
+
+        return points
+
+    @staticmethod
+    def _interpolate_current(points: list[ForecastPoint]) -> float:
+        """Return power for the most recent slot that has started."""
+        now = datetime.now(tz=UTC)
+        best: ForecastPoint | None = None
+        for pt in points:
+            try:
+                dt = datetime.fromisoformat(pt.datetime)
+            except ValueError:
+                continue
+            if dt <= now:
+                best = pt
+        if best is not None:
+            return best.power_w
+        # If all slots are in the future, use the first one
+        return points[0].power_w if points else 0.0

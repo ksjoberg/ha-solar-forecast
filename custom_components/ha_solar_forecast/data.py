@@ -1,12 +1,4 @@
-"""
-Custom types for ha_solar_forecast.
-
-This module defines the runtime data structure attached to each config entry.
-Access pattern: entry.runtime_data.client / entry.runtime_data.coordinator
-
-The SolarForecastConfigEntry type alias is used throughout the integration
-for type-safe access to the config entry's runtime data.
-"""
+"""Custom types for ha_solar_forecast."""
 
 from __future__ import annotations
 
@@ -15,9 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.loader import Integration
 
-    from .api import SolarForecastApiClient
     from .coordinator import SolarForecastDataUpdateCoordinator
 
 
@@ -26,12 +16,23 @@ type SolarForecastConfigEntry = ConfigEntry[SolarForecastData]
 
 @dataclass
 class SolarForecastData:
-    """Runtime data for ha_solar_forecast config entries.
+    """Runtime data stored on the config entry."""
 
-    Stored as entry.runtime_data after successful setup.
-    Provides typed access to the API client and coordinator instances.
-    """
-
-    client: SolarForecastApiClient
     coordinator: SolarForecastDataUpdateCoordinator
-    integration: Integration
+
+
+@dataclass
+class ForecastPoint:
+    """A single forecasted solar production value."""
+
+    datetime: str
+    power_w: float
+    energy_wh: float
+
+
+@dataclass
+class CoordinatorData:
+    """Data returned by the coordinator after each refresh."""
+
+    current_power_w: float
+    forecast: list[ForecastPoint]

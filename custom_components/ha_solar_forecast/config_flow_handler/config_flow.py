@@ -1,245 +1,146 @@
-"""
-Config flow for ha_solar_forecast.
-
-This module implements the main configuration flow including:
-- Initial user setup
-- Reconfiguration of existing entries
-- Reauthentication flow
-
-For more information:
-https://developers.home-assistant.io/docs/config_entries_config_flow_handler
-"""
+"""Config flow for ha_solar_forecast."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from slugify import slugify
-
-from custom_components.ha_solar_forecast.config_flow_handler.schemas import (
-    get_reauth_schema,
-    get_reconfigure_schema,
-    get_user_schema,
+from custom_components.ha_solar_forecast.config_flow_handler.schemas.config import get_location_schema, get_panel_schema
+from custom_components.ha_solar_forecast.const import (
+    CONF_ELEVATION,
+    CONF_LATITUDE,
+    CONF_LONGITUDE,
+    CONF_PANEL_AZIMUTH,
+    CONF_PANEL_INCLINATION,
+    CONF_PANEL_NAME,
+    CONF_PANEL_PEAK_POWER,
+    CONF_PANELS,
+    CONF_WEATHER_ENTITY,
+    DOMAIN,
 )
-from custom_components.ha_solar_forecast.config_flow_handler.validators import validate_credentials
-from custom_components.ha_solar_forecast.const import DOMAIN, LOGGER
 from homeassistant import config_entries
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
-from homeassistant.loader import async_get_loaded_integration
+from homeassistant.core import callback
 
 if TYPE_CHECKING:
-    from custom_components.ha_solar_forecast.config_flow_handler.options_flow import SolarForecastOptionsFlow
-
-# Map exception types to error keys for user-facing messages
-ERROR_MAP = {
-    "SolarForecastApiClientAuthenticationError": "auth",
-    "SolarForecastApiClientCommunicationError": "connection",
-}
+    from .options_flow import SolarForecastOptionsFlow
 
 
 class SolarForecastConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
-    """
-    Handle a config flow for ha_solar_forecast.
-
-    This class manages the configuration flow for the integration, including
-    initial setup, reconfiguration, and reauthentication.
-
-    Supported flows:
-    - user: Initial setup via UI
-    - reconfigure: Update existing configuration
-    - reauth: Handle expired credentials
-
-    For more details:
-    https://developers.home-assistant.io/docs/config_entries_config_flow_handler
-    """
+    """Handle a config flow for Solar Forecast."""
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialise the flow state."""
+        self._location_data: dict[str, Any] = {}
+        self._panels: list[dict[str, Any]] = []
+
     @staticmethod
+    @callback
     def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
+        _config_entry: config_entries.ConfigEntry,
     ) -> SolarForecastOptionsFlow:
-        """
-        Get the options flow for this handler.
-
-        Returns:
-            The options flow instance for modifying integration options.
-
-        """
-        from custom_components.ha_solar_forecast.config_flow_handler.options_flow import (  # noqa: PLC0415
-            SolarForecastOptionsFlow,
-        )
+        """Return the options flow handler."""
+        from .options_flow import SolarForecastOptionsFlow  # noqa: PLC0415
 
         return SolarForecastOptionsFlow()
+
+    # ------------------------------------------------------------------
+    # Step 1: location + weather entity
+    # ------------------------------------------------------------------
 
     async def async_step_user(
         self,
         user_input: dict[str, Any] | None = None,
     ) -> config_entries.ConfigFlowResult:
-        """
-        Handle a flow initialized by the user.
-
-        This is the entry point when a user adds the integration from the UI.
-
-        Args:
-            user_input: The user input from the config flow form, or None for initial display.
-
-        Returns:
-            The config flow result, either showing a form or creating an entry.
-
-        """
+        """Handle the initial step: location and weather entity."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            try:
-                await validate_credentials(
-                    self.hass,
-                    username=user_input[CONF_USERNAME],
-                    password=user_input[CONF_PASSWORD],
-                )
-            except Exception as exception:  # noqa: BLE001
-                errors["base"] = self._map_exception_to_error(exception)
+            weather_entity = user_input[CONF_WEATHER_ENTITY]
+
+            if not self.hass.states.get(weather_entity):
+                errors[CONF_WEATHER_ENTITY] = "weather_entity_not_found"
             else:
-                # Set unique ID based on username
-                # NOTE: This is just an example - use a proper unique ID in production
-                # See: https://developers.home-assistant.io/docs/config_entries_config_flow_handler#unique-ids
-                await self.async_set_unique_id(slugify(user_input[CONF_USERNAME]))
-                self._abort_if_unique_id_configured()
+                self._location_data = {
+                    CONF_LATITUDE: user_input[CONF_LATITUDE],
+                    CONF_LONGITUDE: user_input[CONF_LONGITUDE],
+                    CONF_ELEVATION: user_input.get(CONF_ELEVATION, 0),
+                    CONF_WEATHER_ENTITY: weather_entity,
+                }
+                return await self.async_step_panel()
 
-                return self.async_create_entry(
-                    title=user_input[CONF_USERNAME],
-                    data=user_input,
-                )
-
-        integration = async_get_loaded_integration(self.hass, DOMAIN)
-        assert integration.documentation is not None, "Integration documentation URL is not set in manifest.json"
+        default_lat: float = self.hass.config.latitude
+        default_lon: float = self.hass.config.longitude
+        default_elev: float = self.hass.config.elevation or 0
 
         return self.async_show_form(
             step_id="user",
-            data_schema=get_user_schema(user_input),
+            data_schema=get_location_schema(default_lat, default_lon, default_elev),
             errors=errors,
-            description_placeholders={
-                "documentation_url": integration.documentation,
-            },
         )
 
-    async def async_step_reconfigure(
+    # ------------------------------------------------------------------
+    # Step 2: first / additional panel array
+    # ------------------------------------------------------------------
+
+    async def async_step_panel(
         self,
         user_input: dict[str, Any] | None = None,
     ) -> config_entries.ConfigFlowResult:
-        """
-        Handle reconfiguration of the integration.
-
-        Allows users to update their credentials without removing and re-adding
-        the integration.
-
-        Args:
-            user_input: The user input from the reconfigure form, or None for initial display.
-
-        Returns:
-            The config flow result, either showing a form or updating the entry.
-
-        """
-        entry = self._get_reconfigure_entry()
+        """Collect one panel array configuration."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            try:
-                await validate_credentials(
-                    self.hass,
-                    username=user_input[CONF_USERNAME],
-                    password=user_input[CONF_PASSWORD],
-                )
-            except Exception as exception:  # noqa: BLE001
-                errors["base"] = self._map_exception_to_error(exception)
+            name = str(user_input[CONF_PANEL_NAME]).strip()
+            if not name:
+                errors[CONF_PANEL_NAME] = "panel_name_empty"
+            elif any(p[CONF_PANEL_NAME] == name for p in self._panels):
+                errors[CONF_PANEL_NAME] = "panel_name_duplicate"
             else:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data=user_input,
+                self._panels.append(
+                    {
+                        CONF_PANEL_NAME: name,
+                        CONF_PANEL_PEAK_POWER: int(user_input[CONF_PANEL_PEAK_POWER]),
+                        CONF_PANEL_INCLINATION: int(user_input[CONF_PANEL_INCLINATION]),
+                        CONF_PANEL_AZIMUTH: int(user_input[CONF_PANEL_AZIMUTH]),
+                    }
                 )
+                return await self.async_step_add_another()
 
         return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=get_reconfigure_schema(entry.data.get(CONF_USERNAME, "")),
+            step_id="panel",
+            data_schema=get_panel_schema(),
             errors=errors,
+            description_placeholders={"panel_index": str(len(self._panels) + 1)},
         )
 
-    async def async_step_reauth(
+    # ------------------------------------------------------------------
+    # Step 3: menu — add another panel or finish
+    # ------------------------------------------------------------------
+
+    async def async_step_add_another(
         self,
-        entry_data: dict[str, Any] | None = None,
+        _user_input: dict[str, Any] | None = None,
     ) -> config_entries.ConfigFlowResult:
-        """
-        Handle reauthentication when credentials are invalid.
+        """Ask the user whether to add another panel array."""
+        return self.async_show_menu(
+            step_id="add_another",
+            menu_options=["panel", "finish"],
+        )
 
-        This flow is automatically triggered when the coordinator catches
-        an authentication error (ConfigEntryAuthFailed).
-
-        Args:
-            entry_data: The existing entry data (unused, per convention).
-
-        Returns:
-            The result of the reauth_confirm step.
-
-        """
-        return await self.async_step_reauth_confirm()
-
-    async def async_step_reauth_confirm(
+    async def async_step_finish(
         self,
-        user_input: dict[str, Any] | None = None,
+        _user_input: dict[str, Any] | None = None,
     ) -> config_entries.ConfigFlowResult:
-        """
-        Handle reauthentication confirmation.
-
-        Shows the reauthentication form and processes updated credentials.
-
-        Args:
-            user_input: The user input with updated credentials, or None for initial display.
-
-        Returns:
-            The config flow result, either showing a form or updating the entry.
-
-        """
-        entry = self._get_reauth_entry()
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            try:
-                await validate_credentials(
-                    self.hass,
-                    username=user_input[CONF_USERNAME],
-                    password=user_input[CONF_PASSWORD],
-                )
-            except Exception as exception:  # noqa: BLE001
-                errors["base"] = self._map_exception_to_error(exception)
-            else:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data={**entry.data, **user_input},
-                )
-
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=get_reauth_schema(entry.data.get(CONF_USERNAME, "")),
-            errors=errors,
-            description_placeholders={
-                "username": entry.data.get(CONF_USERNAME, ""),
+        """Create the config entry."""
+        title = self.hass.config.location_name or "Solar Forecast"
+        return self.async_create_entry(
+            title=title,
+            data={
+                **self._location_data,
+                CONF_PANELS: self._panels,
             },
         )
-
-    def _map_exception_to_error(self, exception: Exception) -> str:
-        """
-        Map API exceptions to user-facing error keys.
-
-        Args:
-            exception: The exception that was raised.
-
-        Returns:
-            The error key for display in the config flow form.
-
-        """
-        LOGGER.warning("Error in config flow: %s", exception)
-        exception_name = type(exception).__name__
-        return ERROR_MAP.get(exception_name, "unknown")
 
 
 __all__ = ["SolarForecastConfigFlowHandler"]
